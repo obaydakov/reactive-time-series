@@ -4,12 +4,15 @@ import akka.stream.scaladsl._
 import kafka.serializer._
 import com.softwaremill.react.kafka._
 
-trait Model {
+import scala.concurrent.Future
+
+trait EventConsumer {
+  val timeWindowLength = 60
+
   case class Observation(time: Long, value: BigDecimal)
   object Zero extends Observation(0,0)
 
   case class Memory(length: Int, observation: Observation, pastEvents: List[Observation]) {
-
     lazy val pastValues = pastEvents.map(_.value)
 
     def record(newObservation: Observation): Memory = {
@@ -22,6 +25,13 @@ trait Model {
     }
   }
 
+  def memorySource(source: Source[String, Unit]): Source[Memory, Unit] = {
+    source
+      .map(_.split(' '))
+      .map(parts => Observation(parts(0).toLong, BigDecimal(parts(1))))
+      .scan(Memory(timeWindowLength, Zero, Nil))((m, o) => m.record(o))
+      .drop(1)
+  }
 }
 
 trait KafkaConfig {
@@ -34,21 +44,15 @@ trait KafkaConfig {
   )
 }
 
-object EventConsumer extends App with Model with KafkaConfig {
+object EventConsumerApp extends App with EventConsumer with KafkaConfig {
   implicit val actorSystem  = ActorSystem("EventConsumer")
   implicit val materializer = ActorMaterializer()
   import actorSystem.dispatcher
-        
+
   val kafka = new ReactiveKafka()
   val topic = kafka.consume(kafkaProperties)
 
-  val T = 60
-
-  Source(topic)
-    .map(_.message.split(' ')).map(parts => Observation(parts(0).toLong, BigDecimal(parts(1))))
-    .scan(Memory(T, Zero, Nil))((m,o) => m.record(o))
-    .drop(1)
+  memorySource(Source(topic).map(_.message))
     .to(Sink.foreach(println))
     .run()
-       
 }
